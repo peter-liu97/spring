@@ -1,14 +1,16 @@
 package org.springframework.context.imp;
 
-import org.springframework.annotation.Component;
-import org.springframework.annotation.ComponentScan;
-import org.springframework.annotation.Lazy;
-import org.springframework.annotation.Scope;
+import org.springframework.annotation.*;
+import org.springframework.beandinition.BeanDefinition;
 import org.springframework.context.ApplicationContext;
 
 import java.io.File;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author liushimin
@@ -16,43 +18,109 @@ import java.net.URL;
 
 public class AnnotationConfigApplicationContext implements ApplicationContext {
 
-    private Class configClass;
+    private Class<?> configClass;
+
+    private Map<String, BeanDefinition> beanDefinitionMap = new ConcurrentHashMap<String, BeanDefinition>();
+
+    private Map<String, Object> singletonObjects = new ConcurrentHashMap<String, Object>();
 
     public AnnotationConfigApplicationContext() {
     }
 
-    public AnnotationConfigApplicationContext(Class configClass) {
+    public AnnotationConfigApplicationContext(Class<?> configClass) {
         this.configClass = configClass;
 
         /**
          * 扫描
          */
         scanPath(configClass);
+
+        /**
+         * 创建非懒加载的bean
+         */
+        creatBean();
     }
 
-    private void scanPath(Class configClass) {
+    private void creatBean() {
+        for (String beanName : beanDefinitionMap.keySet()) {
+            BeanDefinition beanDefinition = beanDefinitionMap.get(beanName);
+            if ("singleton".equals(beanDefinition.getScope()) && !beanDefinition.isLazy()) {
+                Object bean = doCreatBean(beanDefinition);
+                singletonObjects.put(beanName, bean);
+            }
+        }
+    }
 
-        Annotation[] annotations = configClass.getAnnotations();
-
-        if (annotations.length == 0) {
-
+    private Object doCreatBean(BeanDefinition beanDefinition) {
+        Class<?> beanClass = beanDefinition.getBeanClass();
+        /**
+         * 推断构造方法
+         */
+        Object bean = null;
+        try {
+             bean = beanClass.getDeclaredConstructor().newInstance();
+        } catch (InstantiationException e) {
+            e.printStackTrace();
+        } catch (IllegalAccessException e) {
+            e.printStackTrace();
+        } catch (InvocationTargetException e) {
+            e.printStackTrace();
+        } catch (NoSuchMethodException e) {
+            e.printStackTrace();
         }
 
-        for (Annotation annotation : annotations) {
-            if (annotation instanceof ComponentScan) {
-                ComponentScan componentScan = (ComponentScan) annotation;
+        /**
+         * 属性注入
+         */
+        Field[] declaredFields = beanClass.getDeclaredFields();
+        for (Field declaredField : declaredFields) {
+            if(declaredField.isAnnotationPresent(Autowired.class)){
+                //byName
+                declaredField.setAccessible(true);
+                Object instance = getBean(declaredField.getName());
                 try {
-                    doScan(componentScan.value());
-                } catch (ClassNotFoundException e) {
+                    declaredField.set(bean,instance);
+                } catch (IllegalAccessException e) {
                     e.printStackTrace();
                 }
+                //byType
+            }
+        }
+
+        return bean;
+    }
+
+    private void scanPath(Class<?> configClass) {
+
+        if (configClass.isAnnotationPresent(ComponentScan.class)) {
+            ComponentScan componentScan = configClass.getAnnotation(ComponentScan.class);
+            try {
+                doScan(componentScan.value());
+            } catch (ClassNotFoundException e) {
+                e.printStackTrace();
             }
         }
 
     }
 
     public Object getBean(String beanName) {
-
+        if (!beanDefinitionMap.containsKey(beanName)) {
+            throw new NullPointerException();
+        }
+        BeanDefinition beanDefinition = beanDefinitionMap.get(beanName);
+        String scope = beanDefinition.getScope();
+        if ("singleton".equals(scope)) {
+            //单例池中获取
+            Object o = singletonObjects.get(beanName);
+            if (o == null){
+               o = doCreatBean(beanDefinition);
+                singletonObjects.put(beanName,o);
+            }
+            return o;
+        } else if ("prototype".equals(scope)) {
+            //创建一个bean
+            return doCreatBean(beanDefinition);
+        }
         return null;
     }
 
@@ -66,17 +134,24 @@ public class AnnotationConfigApplicationContext implements ApplicationContext {
             String s = f.getAbsolutePath();
             if (s.endsWith(".class")) {
                 s = s.substring(s.indexOf("com"), s.indexOf(".class"));
-                s.replace("\\",".");
+                s = s.replace("\\", ".");
             }
             Class<?> aClass = classLoader.loadClass(s);
-            if(aClass.isAnnotationPresent(Component.class)){
-
-                if(aClass.isAnnotationPresent(Lazy.class)){
-
+            if (aClass.isAnnotationPresent(Component.class)) {
+                BeanDefinition beanDefinition = new BeanDefinition();
+                beanDefinition.setBeanClass(aClass);
+                Component component = aClass.getAnnotation(Component.class);
+                String beanName = component.value();
+                beanDefinition.setBeanName(beanName);
+                if (aClass.isAnnotationPresent(Lazy.class)) {
+                    beanDefinition.setLazy(true);
                 }
-
-                if(aClass.isAnnotationPresent(Scope.class)){
-
+                if (aClass.isAnnotationPresent(Scope.class)) {
+                    Scope annotation = aClass.getAnnotation(Scope.class);
+                    String value = annotation.value();
+                    beanDefinition.setScope(value);
+                } else {
+                    beanDefinition.setScope("singletion");
                 }
 
             }
